@@ -420,14 +420,18 @@ namespace LenovoCoolBoost
             _refreshTimer.Tick += (s, e) => RefreshStatus();
             _refreshTimer.Start();
 
-            Log("窗口已创建，自动开启满速...");
-            StartFan(false);
-
-            if (startHidden)
+            // 校准需要几秒（EC 切档滞后大，必须等稳定），所以不能在构造函数里同步做，
+            // 否则窗口要等好几秒才画出来、看起来像没启动。这里等窗口显示后再触发。
+            Load += (s, e) =>
             {
-                // 不显示窗口，只留托盘
-                Load += (s, e) => Hide();
-            }
+                if (startHidden) Hide();
+                if (_statusLabel != null) _statusLabel.Text = "状态：正在开启（校准中…）";
+                BeginInvoke(new Action(() =>
+                {
+                    Log("窗口已显示，开始自动开启满速...");
+                    StartFan(false);
+                }));
+            };
         }
 
         private void BuildWindow()

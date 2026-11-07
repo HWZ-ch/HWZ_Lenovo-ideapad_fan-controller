@@ -4,7 +4,7 @@
 
 > 逆向与分析机型：**联想小新 16 IRL8**（Lenovo EM 机型，`AcpiVpc.sys` 驱动）
 >
-> 当前版本 **v1.2.0** —— 变更明细见 [CHANGELOG.md](CHANGELOG.md)
+> 当前版本 **v1.2.1** —— 变更明细见 [CHANGELOG.md](CHANGELOG.md)
 
 ---
 
@@ -53,12 +53,25 @@
 
 ## 快速开始
 
+### ⚠️ 先看这条：不要从受管目录运行
+
+如果把这个 exe 放在某些**受管/沙箱目录**（例如自动化工具的工作区目录）里运行，
+进程会受到限制 —— 表现为**托盘图标不出现、日志文件也写不出来**，而窗口看起来又是正常的。
+
+实测验证：同一个 exe 放到 `%TEMP%` 或 `%LOCALAPPDATA%` 下运行，图标与日志全部正常。
+
+**推荐安装位置：`%LOCALAPPDATA%\LenovoCoolBoost\`**（本项目已装在此处，并建了桌面快捷方式）。
+
 ### 方式一：C# 桌面程序（推荐）
 
 ```powershell
 cd src\LenovoCoolBoost
 dotnet build -c Release
-# 产物: bin\Release\net8.0-windows\LenovoCoolBoost.exe
+
+# 发布成单文件，并装到工作区之外的位置
+dotnet publish -c Release -r win-x64 --self-contained false `
+  -p:PublishSingleFile=true -p:DebugType=none `
+  -o "$env:LOCALAPPDATA\LenovoCoolBoost"
 ```
 
 启动时若未以管理员身份运行，程序会**自动通过 UAC 请求提权**（加 `--no-elevate` 可跳过）。
@@ -145,6 +158,30 @@ tools/                    逆向期的探针脚本 + 图标生成（见下方说
 > 除 `gen_icon.py` 外都是逆向期的诊断脚本，**保留仅供复盘，不是推荐使用路径**。
 
 > ⚠️ `ec_fan_lock.py` / `ec_scan_fan.py` 依赖 **InpOut32/InpOutx64** 的端口 I/O 驱动（`inpoutx64.dll` + `.sys`）。为保持仓库干净，**本仓库不附带这些二进制文件**，需要时请自行从 <https://www.highrez.co.uk/downloads/inpout32/> 获取，并放到 `tools/inpout/x64/` 下。请注意 InpOut 是第三方驱动，使用时自行确认其许可证与安全风险。
+
+---
+
+## 托盘图标
+
+Windows 11 默认把新应用的托盘图标折叠进任务栏的「^」溢出区。要让图标直接显示在任务栏上：
+
+```powershell
+# 1) 先运行一次程序，让系统登记该 exe 的托盘记录
+# 2) 找到对应项并把 IsPromoted 设为 1
+$base = 'HKCU:\Control Panel\NotifyIconSettings'
+$exe  = "$env:LOCALAPPDATA\LenovoCoolBoost\LenovoCoolBoost.exe"
+Get-ChildItem $base | ForEach-Object {
+    $p = Get-ItemProperty $_.PSPath
+    if ($p.ExecutablePath -eq $exe) {
+        New-ItemProperty -Path $_.PSPath -Name IsPromoted -Value 1 -PropertyType DWord -Force
+    }
+}
+# 3) 退出程序再启动，图标即出现在任务栏托盘区
+```
+
+也可以不等：点任务栏的「^」，把雪花图标**拖到任务栏**即可固定（Windows 会记住）。
+
+如果图标怎么都不出现，先确认是不是从受管目录运行的（见上方「先看这条」）。
 
 ---
 

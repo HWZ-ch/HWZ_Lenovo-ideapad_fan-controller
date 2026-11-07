@@ -90,9 +90,12 @@ namespace LenovoCoolBoost
         private const int DefaultLoopIntervalMs = 600;     // <2s：刷新频率高于固件 2s 暂停
         private const int EdgeGapDefaultMs = 300;          // false→true 边沿间隔
         private const int ForceEdgeEveryLoops = 50;        // ≈30s 无条件重排一次
-        private const int CalibrationSettleMs = 250;       // 校准时等 EC 稳定的最短时间
-        private const int CalibrationTimeoutMs = 1800;     // 单次采样最长等待
+        private const int CalibrationSettleMs = 1500;       // 切档后等 EC 应用新状态。实测读完有数秒级滞后，
+                                                            // 250ms/600ms 都会读到上一个状态的值，导致判据反向
+        private const int CalibrationTimeoutMs = 2000;     // 单次采样最长等待
         private const int PollSliceMs = 80;                // 采样轮询间隔
+        private const int RestoreRetries = 4;              // 恢复默认转速的重复次数
+        private const int RestoreGapMs = 350;              // 恢复重试间隔
 
         // 未校准时使用的兜底值：本机实测空闲≈0x85(133)、强制≈0x28(40)，取中点 100 以下判为在转。
         private const double FallbackThreshold = 100.0;
@@ -327,7 +330,7 @@ namespace LenovoCoolBoost
         /// <summary>采集"正常档/最大档"两个读数并据此确定阈值与方向。会重试一次。</summary>
         private void Calibrate()
         {
-            for (int attempt = 0; attempt < 3; attempt++)
+            for (int attempt = 0; attempt < 2; attempt++)
             {
                 if (TryCalibrateOnce(attempt)) return;
             }
@@ -373,7 +376,7 @@ namespace LenovoCoolBoost
 
             // 有效性校验：两档读数必须拉开足够差距，否则说明采到了同一个状态
             double diff = Math.Abs((double)idle.Value - fast.Value);
-            double margin = Math.Max(8.0, idle.Value * 0.10);
+            double margin = Math.Max(8.0, Math.Min(idle.Value, fast.Value) * 0.10);
             if (diff < margin)
             {
                 LogL(string.Format("校准第 {0} 次：两档读数差异过小(正常=0x{1:X2} 最大=0x{2:X2} 差={3:F0} 需≥{4:F0})，判为无效",
@@ -381,10 +384,46 @@ namespace LenovoCoolBoost
                 return false;
             }
 
-            _threshold = (idle.Value + fast.Value) / 2.0;
-            _fastIsLower = fast.Value < idle.Value;
+            double thr = (idle.Value + fast.Value) / 2.0;
+            bool fastLower = fast.Value < idle.Value;
+
+            // 关键验证：EC 读数对切档有滞后，上面两次采样可能"错位一格"
+            // （读到的是上一个状态的值），从而把方向判反。实测出现过
+            // 「正常=0x21(33) 最大=0x87(135) 高值=在转」这种完全反向的结果——
+            // 那样程序会把"正在满速"当成"已停止"，反复把风扇关掉。
+            // 所以这里再切换一次，用实测确认：最大档必须判为"在转"，正常档必须判为"停"。
+            string verr;
+            if (TryWriteMode(false, out verr)) Thread.Sleep(EdgeGapMs);
+            if (TryWriteMode(true, out verr)) Thread.Sleep(CalibrationSettleMs);
+            uint vFast;
+            if (!TryRead(out vFast))
+            {
+                LogL(string.Format("校准第 {0} 次：验证阶段读取失败", attempt + 1));
+                return false;
+            }
+            bool fastOk = fastLower ? (vFast < thr) : (vFast > thr);
+
+            if (TryWriteMode(false, out verr)) Thread.Sleep(CalibrationSettleMs);
+            uint vIdle;
+            if (!TryRead(out vIdle))
+            {
+                LogL(string.Format("校准第 {0} 次：验证阶段读取失败", attempt + 1));
+                return false;
+            }
+            bool idleOk = fastLower ? (vIdle >= thr) : (vIdle <= thr);
+
+            if (!fastOk || !idleOk)
+            {
+                LogL(string.Format(
+                    "校准第 {0} 次：验证不通过(最大档实读=0x{1:X2} 需判为在转={2}；正常档实读=0x{3:X2} 需判为停={4})，判据可能反向，重试",
+                    attempt + 1, vFast, fastOk, vIdle, idleOk));
+                return false;
+            }
+
+            _threshold = thr;
+            _fastIsLower = fastLower;
             _calibrated = true;
-            LogL(string.Format("校准完成：正常=0x{0:X2}({0}) 最大=0x{1:X2}({1}) 阈值={2:F1} {3}",
+            LogL(string.Format("校准完成：正常=0x{0:X2}({0}) 最大=0x{1:X2}({1}) 阈值={2:F1} {3}（已通过反向验证）",
                 idle.Value, fast.Value, _threshold, _fastIsLower ? "低值=在转" : "高值=在转"));
             return true;
         }
@@ -440,8 +479,23 @@ namespace LenovoCoolBoost
         /// <summary>触发一次除尘最大档（不启动保活循环）。</summary>
         public void Trigger() { WriteMode(true); }
 
-        /// <summary>切回正常档。</summary>
-        public void Restore() { WriteMode(false); }
+        /// <summary>
+        /// 恢复默认转速。
+        ///
+        /// 为什么要重复下发：实测进程被强制结束（崩溃/任务管理器结束）后，EC 可能锁在
+        /// "强制最大档"状态并忽略单次正常指令，用户看到的现象就是"关不掉、一直在狂转"。
+        /// 这里重复下发若干次并留出间隔，提高真正停下来的概率。
+        /// </summary>
+        public void Restore()
+        {
+            string err;
+            for (int i = 0; i < RestoreRetries; i++)
+            {
+                if (!TryWriteMode(false, out err)) break;
+                if (i < RestoreRetries - 1) Thread.Sleep(RestoreGapMs);
+            }
+            SetState(FanState.Idle);
+        }
 
         /// <summary>边沿重置：正常 → 等待 → 最大。</summary>
         public void ReArm()
@@ -517,9 +571,7 @@ namespace LenovoCoolBoost
             if (t != null && t.IsAlive && t != Thread.CurrentThread)
                 t.Join(3000);
 
-            string err;
-            TryWriteMode(false, out err);
-            SetState(FanState.Idle);
+            Restore();   // 重复下发正常档，确保真的停下来
             LogL("Disable 完成，已恢复默认转速");
         }
 

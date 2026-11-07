@@ -9,9 +9,9 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <AssemblyTitle>Lenovo 降温除尘持续激活</AssemblyTitle>
     <AssemblyDescription>一键开关联想风扇最大转速(EnergyDrv 除尘命令)</AssemblyDescription>
-    <Version>1.2.0</Version>
-    <FileVersion>1.2.0.0</FileVersion>
-    <AssemblyVersion>1.2.0.0</AssemblyVersion>
+    <Version>1.2.1</Version>
+    <FileVersion>1.2.1.0</FileVersion>
+    <AssemblyVersion>1.2.1.0</AssemblyVersion>
     <ApplicationIcon>app.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
