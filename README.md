@@ -3,6 +3,8 @@
 让联想小新 / IdeaPad 的风扇**持续保持最高转速**，即把联想电脑管家里那个「降温除尘」功能变成可一键开关、可脚本化的原生工具。
 
 > 逆向与分析机型：**联想小新 16 IRL8**（Lenovo EM 机型，`AcpiVpc.sys` 驱动）
+>
+> 当前版本 **v1.1.0** —— 变更明细见 [CHANGELOG.md](CHANGELOG.md)
 
 ---
 
@@ -22,7 +24,7 @@
 |---|---|
 | ✅ **唯一可用通道是 EnergyDrv 设备命令** | 控制 IOCTL `0x831020C0`，入参 `{6, 1, mode}`，`mode=1` 最大档 / `0` 正常档 |
 | ✅ 设备名需自动探测 | 不同机型/驱动版本暴露的名称不同：`\\.\EnergyDrv`、`\\.\Lenovo0`、`\\.\Lenovo1`、`\\.\AcpiVpc` |
-| ✅ 状态读取用另一条 IOCTL | `0x831020C4`，入参 `{14}`；实测**空闲 ≈ `0x85`(133)，强制生效 ≈ `0x28`(40)**，故 `<100` 视为风扇在转 |
+| ✅ 状态读取用另一条 IOCTL | `0x831020C4`，入参 `{14}`；本机实测**空闲 ≈ `0x85`(133)，强制生效 ≈ `0x23`~`0x28`(35~40)**。阈值由启动时校准得出，而非写死 |
 | ❌ **`EC[0xFE]` 不是风扇转速寄存器** | 早期误判。触发真实除尘（风扇必转）时扫描 EC，`0xFE` **始终为 `0x00`**；单独写 `0xFE=0x50` 时热区仅微降、听不到风扇转 |
 | ❌ **9s 高速 + 2s 停顿无法消除** | 这是 **EC 固件写死的周期**，任何软件都去不掉，只能通过高频重触发让它尽量接近连续 |
 | ❌ **WMI 没有可编程风扇 / 性能模式接口** | 无 `Lenovo_FanMode` / `ThermalMode` / `LENOVO_GAMEZONE` 类；`LENOVO_UTILITY_DATA` 只有 `GetIfSupportOrVersion`，无 setter |
@@ -59,29 +61,45 @@ dotnet build -c Release
 # 产物: bin\Release\net8.0-windows\LenovoCoolBoost.exe
 ```
 
-用**管理员身份**运行 `LenovoCoolBoost.exe`：
+启动时若未以管理员身份运行，程序会**自动通过 UAC 请求提权**（加 `--no-elevate` 可跳过）。
 
 - 双击即自动开启满速，无需额外操作
 - 右下角托盘图标：双击切换开关；右键菜单可「关闭并恢复默认」「开机自启」「退出」
 - 睡眠/唤醒自动跟随（休眠前关闭，唤醒后按上次状态恢复）
 
-自检与诊断：
+命令行：
 
 ```powershell
-LenovoCoolBoost.exe --test   # 无界面自检：开启并采样 180 秒，保持率 ≥90% 算通过；结束后自动恢复
-LenovoCoolBoost.exe --diag   # 观测模式：逐秒记录真实读数，长停转时尝试软重启恢复
+LenovoCoolBoost.exe --status  # 只读打印设备名/状态/阈值/权限，不改风扇状态
+LenovoCoolBoost.exe --off     # 一次性恢复默认转速（善后，不影响托盘实例）
+LenovoCoolBoost.exe --test    # 无界面自检：开启并采样 180 秒，保持率 ≥90% 算通过；结束后自动恢复
+LenovoCoolBoost.exe --diag    # 观测模式：逐秒记录真实读数，长停转时尝试软重启恢复
 ```
+
+> `--status` 的提示：程序是 GUI 子系统（WinExe），从 PowerShell 直接调用不会等待它结束。
+> 想稳定拿到输出请用：
+> ```powershell
+> Start-Process .\LenovoCoolBoost.exe -ArgumentList '--status' -NoNewWindow -Wait
+> ```
 
 日志位置：`%TEMP%\LenovoCoolBoost.log`；自检写 `%LOCALAPPDATA%\LenovoCoolBoost_test.log`。
 
-> 后台循环以 **600ms** 间隔检测读数，一旦发现掉速立刻做一次 `正常 → 300ms → 最大` 的边沿重置，以此抢在固件 2 秒停顿前重排；另外每约 30 秒无条件强制重置一次作为兜底。
+> **阈值是校准出来的，不是写死的。** 开启时会先采样「正常档」和「最大档」两个读数并取中点作阈值，
+> 同时自动判定「低值=在转」还是「高值=在转」，所以 `--status` 会显示 `[默认阈值]` 还是 `[已校准]`。
+> 本机校准结果：正常 `0x85`(133)、最大 `0x23`(35)、阈值 `84.0`。
+>
+> 校准采用「轮询到读数稳定 + 两档差异校验」：切档后 EC 不会立刻反映新转速，固定等一小会儿就读
+> 很容易采到 `0x87` 这类过渡值从而把判据方向算反。校准失败时会回退默认阈值，此时程序**不会**
+> 依据读数判断，只做周期性刷新与重排，避免误判导致反复切档。
+>
+> 后台循环以 **600ms** 间隔刷新最大档命令，一旦发现掉速立刻做一次 `正常 → 300ms → 最大` 的边沿重置，以此抢在固件 2 秒停顿前重排；另外每约 30 秒无条件强制重置一次作为兜底。
 
 ### 方式二：Python 脚本
 
 ```powershell
-python python\lenovo_cool_boost.py status   # 查看当前档位
+python python\lenovo_cool_boost.py status   # 查看当前档位（只读，不会改变风扇状态）
 python python\lenovo_cool_boost.py once     # 触发一次官方除尘（约 2 分钟后自动停）
-python python\lenovo_cool_boost.py start    # 持续激活，Ctrl+C 停止
+python python\lenovo_cool_boost.py start    # 持续激活（先校准再保活），Ctrl+C 停止
 ```
 
 只依赖标准库，不需要第三方包。`start --tray` 需要额外 `pip install pystray pillow`。
@@ -92,12 +110,13 @@ python python\lenovo_cool_boost.py start    # 持续激活，Ctrl+C 停止
 
 ```
 src/LenovoCoolBoost/      C# 托盘程序（主交付物）
-  FanController.cs          EnergyDrv 设备封装：探测/开关/读状态/保活循环
-  Program.cs                托盘 UI、自检(--test)、观测(--diag)
+  FanController.cs          EnergyDrv 设备封装：探测/校准/开关/读状态/保活循环
+  Program.cs                托盘 UI、--status、自检(--test)、观测(--diag)
 src/lhm_spike/            为确认「读不到真实转速」而做的最小验证程序（LibreHardwareMonitor 探针）
 python/lenovo_cool_boost.py   Python 版同后端实现
 docs/FanControl_Setup_Guide.md 备选方案：FanControl + Lenovo 插件（GUI，无需写代码）
 docs/RESEARCH_NOTES.md    完整逆向过程、被证伪的路径与踩坑记录
+CHANGELOG.md              版本变更记录
 tools/                    逆向期的探针脚本（见下方说明）
 ```
 
