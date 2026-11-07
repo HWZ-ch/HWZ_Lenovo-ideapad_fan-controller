@@ -1,0 +1,46 @@
+# ---------- .NET ----------
+bin/
+obj/
+[Bb]in/
+[Oo]bj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.pdb
+*.deps.json
+*.runtimeconfig.json
+*.nuget.g.props
+*.nuget.g.targets
+project.assets.json
+project.nuget.cache
+.vs/
+publish/
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# ---------- 日志 / 运行时产物 ----------
+*.log
+*.tmp
+temp_*.log
+
+# ---------- 第三方驱动二进制（不入库，见 README） ----------
+tools/inpout/
+tools/rw_tmp/
+*.sys
+InpOutBinaries.zip
+
+# ---------- OS ----------
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ---------- 个人笔记 ----------
+.workbuddy/

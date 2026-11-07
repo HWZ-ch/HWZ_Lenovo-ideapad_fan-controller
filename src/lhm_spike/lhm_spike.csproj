@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>lhm_spike</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- 用 NuGet 引用替代原工程的绝对路径 HintPath，便于他人直接构建 -->
+    <PackageReference Include="LibreHardwareMonitorLib" Version="0.9.4" />
+  </ItemGroup>
+</Project>
