@@ -4,7 +4,7 @@
 
 > 逆向与分析机型：**联想小新 16 IRL8**（Lenovo EM 机型，`AcpiVpc.sys` 驱动）
 >
-> 当前版本 **v1.1.0** —— 变更明细见 [CHANGELOG.md](CHANGELOG.md)
+> 当前版本 **v1.2.0** —— 变更明细见 [CHANGELOG.md](CHANGELOG.md)
 
 ---
 
@@ -53,7 +53,7 @@
 
 ## 快速开始
 
-### 方式一：C# 托盘程序（推荐）
+### 方式一：C# 桌面程序（推荐）
 
 ```powershell
 cd src\LenovoCoolBoost
@@ -63,15 +63,25 @@ dotnet build -c Release
 
 启动时若未以管理员身份运行，程序会**自动通过 UAC 请求提权**（加 `--no-elevate` 可跳过）。
 
-- 双击即自动开启满速，无需额外操作
-- 右下角托盘图标：双击切换开关；右键菜单可「关闭并恢复默认」「开机自启」「退出」
-- 睡眠/唤醒自动跟随（休眠前关闭，唤醒后按上次状态恢复）
+打开后是一个控制窗口：
+
+- 顶部实时显示状态（满速运行中 / 正常转速）、设备名与当前读数
+- **「开启满速(降温除尘)」** 与 **「停止并恢复默认转速」** 两个按钮
+- 开机自启、隐藏到托盘、退出
+- 双击运行时自动开启满速；睡眠/唤醒自动跟随
+
+> 点窗口右上角 X **不会退出**，而是缩到托盘并弹提示（防止你以为已停止、风扇却还在转）。
+> 要真正停止，用「停止并恢复默认转速」；要退出，用「退出」按钮 —— 退出时会先恢复默认转速。
+
+托盘图标也提供同样的菜单。如果系统把托盘图标折叠进了「^」溢出区，点 ^ 找到它后
+拖动到任务栏即可固定；也可以直接用窗口操作，不必依赖图标。
 
 命令行：
 
 ```powershell
+LenovoCoolBoost.exe --tray    # 启动后只驻留托盘，不显示窗口
 LenovoCoolBoost.exe --status  # 只读打印设备名/状态/阈值/权限，不改风扇状态
-LenovoCoolBoost.exe --off     # 一次性恢复默认转速（善后，不影响托盘实例）
+LenovoCoolBoost.exe --off     # 一次性恢复默认转速（善后，不影响正在运行的实例）
 LenovoCoolBoost.exe --test    # 无界面自检：开启并采样 180 秒，保持率 ≥90% 算通过；结束后自动恢复
 LenovoCoolBoost.exe --diag    # 观测模式：逐秒记录真实读数，长停转时尝试软重启恢复
 ```
@@ -109,29 +119,64 @@ python python\lenovo_cool_boost.py start    # 持续激活（先校准再保活�
 ## 仓库结构
 
 ```
-src/LenovoCoolBoost/      C# 托盘程序（主交付物）
+src/LenovoCoolBoost/      C# 桌面程序（主交付物）
   FanController.cs          EnergyDrv 设备封装：探测/校准/开关/读状态/保活循环
-  Program.cs                托盘 UI、--status、自检(--test)、观测(--diag)
+  Program.cs                控制窗口、托盘、--status/--off、自检(--test)、观测(--diag)
+  app.ico                   应用图标（16~256 多尺寸，由 tools/gen_icon.py 生成）
+  LenovoCoolBoost-signing.cer  代码签名证书公钥（自签名，见「代码签名」一节）
 src/lhm_spike/            为确认「读不到真实转速」而做的最小验证程序（LibreHardwareMonitor 探针）
 python/lenovo_cool_boost.py   Python 版同后端实现
 docs/FanControl_Setup_Guide.md 备选方案：FanControl + Lenovo 插件（GUI，无需写代码）
 docs/RESEARCH_NOTES.md    完整逆向过程、被证伪的路径与踩坑记录
 CHANGELOG.md              版本变更记录
-tools/                    逆向期的探针脚本（见下方说明）
+tools/                    逆向期的探针脚本 + 图标生成（见下方说明）
 ```
 
 ### 关于 `tools/`
 
-这些是逆向过程中用的诊断脚本，**保留仅供复盘，不是推荐使用路径**：
-
 | 脚本 | 用途 |
 |---|---|
+| `gen_icon.py` | 生成 `app.ico`（雪花图标，多尺寸）。改图标后重跑此脚本再构建 |
 | `ec_scan_fan.py` | 对比空闲态与强制除尘态的 EC 全部 256 个寄存器 + EnergyDrv 读索引 0~31，找真实转速反馈通道 |
 | `ed_probe.py` | 只用 EnergyDrv 读索引，探测哪个索引随风扇启停变化 |
 | `ec_fan_lock.py` | 早期「直写 EC 寄存器」方案，**已被证伪**，见 RESEARCH_NOTES |
 | `gen_baseline.py` / `ec_baseline.json` | 生成 EC 基线快照 |
 
+> 除 `gen_icon.py` 外都是逆向期的诊断脚本，**保留仅供复盘，不是推荐使用路径**。
+
 > ⚠️ `ec_fan_lock.py` / `ec_scan_fan.py` 依赖 **InpOut32/InpOutx64** 的端口 I/O 驱动（`inpoutx64.dll` + `.sys`）。为保持仓库干净，**本仓库不附带这些二进制文件**，需要时请自行从 <https://www.highrez.co.uk/downloads/inpout32/> 获取，并放到 `tools/inpout/x64/` 下。请注意 InpOut 是第三方驱动，使用时自行确认其许可证与安全风险。
+
+---
+
+## 代码签名
+
+发布版 exe 已用自签名证书签名，并带 DigiCert 的 RFC3161 时间戳。
+
+```powershell
+# 查看签名状态
+Get-AuthenticodeSignature .\LenovoCoolBoost.exe
+
+# 用 SDK 的 signtool 详细验证
+signtool verify /pa /v .\LenovoCoolBoost.exe
+```
+
+**签名者**：`CN=HWZ Lenovo Cool Boost, O=HWZ, C=CN`，RSA 3072 / SHA-256，有效期至 2031-11-07。
+
+### ⚠️ 自签名 ≠ 全球可信
+
+自签名证书只在**安装了该证书的机器**上被视为可信。在别人的电脑上运行，Windows 仍会
+提示「未知发布者」，因为它的根证书不在系统信任列表里。要在其他机器上消除警告，需要：
+
+```powershell
+# 以管理员身份，导入随仓库提供的公钥证书
+certutil -addstore -f Root .\src\LenovoCoolBoost\LenovoCoolBoost-signing.cer
+certutil -addstore -f TrustedPublisher .\src\LenovoCoolBoost\LenovoCoolBoost-signing.cer
+```
+
+> 导入自签名根证书意味着**这台机器将信任该证书签名的任何程序**。只在你确认来源可信时这样做。
+
+要彻底消除所有机器上的警告，只能购买 CA（DigiCert / Sectigo / GlobalSign 等）签发的
+代码签名证书，通常需要企业资质审核，并可能要求硬件令牌 —— 这不是本项目能提供的。
 
 ---
 
