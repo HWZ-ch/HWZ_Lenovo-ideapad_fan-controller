@@ -1,8 +1,8 @@
 using System;
 using System.Net.Http;
 using System.Reflection;
+using System.Text;
 using System.Text.Json;
-using System.Threading;
 
 namespace LenovoCoolBoost
 {
@@ -27,7 +27,7 @@ namespace LenovoCoolBoost
         /// <summary>下载/查看页面地址。</summary>
         public string DownloadUrl { get; set; }
 
-        /// <summary>数据来源：releases / version.json。</summary>
+        /// <summary>数据来源：releases / contents-api / raw。</summary>
         public string Source { get; set; }
 
         /// <summary>检查失败时的原因；成功时为 null。</summary>
@@ -49,10 +49,15 @@ namespace LenovoCoolBoost
     /// <summary>
     /// 从 GitHub 仓库自动获取最新版本并与本地版本比对。
     ///
-    /// 数据来源优先级：
-    ///   1) GitHub Releases API 的 latest 发布（tag_name）
-    ///   2) 仓库根目录的 version.json（没有发布 Release 时兜底）
-    /// 全程只读 GET，失败一律返回 Error，不抛异常。
+    /// 数据来源按优先级依次尝试（任何一步成功即返回）：
+    ///   1) GitHub Releases API 的 latest（api.github.com）
+    ///   2) 仓库 version.json，走 **Contents API**（同样是 api.github.com）
+    ///   3) 仓库 version.json，走 raw.githubusercontent
+    ///
+    /// 为什么第 2 步用 Contents API 而不是直接读 raw：某些受限网络里
+    /// raw.githubusercontent.com / jsdelivr 不可达，但 api.github.com 可以通。
+    ///
+    /// 全程只读 GET，失败一律写进 Error，不抛异常、不影响程序其余功能。
     /// </summary>
     public static class UpdateChecker
     {
@@ -63,10 +68,20 @@ namespace LenovoCoolBoost
 
         private static HttpClient CreateClient()
         {
-            var c = new HttpClient { Timeout = TimeSpan.FromMilliseconds(8000) };
+            var c = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
             c.DefaultRequestHeaders.UserAgent.ParseAdd("LenovoCoolBoost-UpdateChecker");
             c.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
+            // 让中间的加速/代理层不要回放旧缓存（实测有代理会缓存 /releases/latest，
+            // 导致新版本已发布或已删除时仍读到旧结果）
+            c.DefaultRequestHeaders.CacheControl =
+                new System.Net.Http.Headers.CacheControlHeaderValue { NoCache = true, NoStore = true };
             return c;
+        }
+
+        /// <summary>给 URL 追加一个无意义的参数，绕过中间层的 URL 缓存。</summary>
+        private static string NoCache(string url)
+        {
+            return url + (url.Contains("?") ? "&" : "?") + "ts=" + DateTime.UtcNow.Ticks;
         }
 
         /// <summary>本程序版本（取自程序集，永远与实际二进制一致）。</summary>
@@ -88,38 +103,38 @@ namespace LenovoCoolBoost
         {
             var result = new UpdateCheckResult { Current = CurrentVersion };
 
-            // 1) 先试 Releases
-            string tag, body, url;
-            if (TryGetLatestRelease(out tag, out body, out url))
+            string ver, notes, url, source;
+
+            // 1) Releases
+            if (TryGetLatestRelease(out ver, out notes, out url))
             {
-                result.LatestRaw = tag;
-                result.Latest = ParseVersion(tag);
-                result.ReleaseNotes = body;
-                result.DownloadUrl = url;
-                result.Source = "releases";
+                source = "releases";
+            }
+            // 2) version.json via Contents API
+            else if (TryGetVersionJsonViaApi(out ver, out notes, out url))
+            {
+                source = "contents-api";
+            }
+            // 3) version.json via raw
+            else if (TryGetVersionJsonViaRaw(out ver, out notes, out url))
+            {
+                source = "raw";
             }
             else
             {
-                // 2) 回退到 version.json
-                string ver, notes2, dl2;
-                if (TryGetVersionJson(out ver, out notes2, out dl2))
-                {
-                    result.LatestRaw = ver;
-                    result.Latest = ParseVersion(ver);
-                    result.ReleaseNotes = notes2;
-                    result.DownloadUrl = dl2;
-                    result.Source = "version.json";
-                }
-                else
-                {
-                    result.Error = "无法访问 GitHub（网络不可用或被拦截）";
-                    return result;
-                }
+                result.Error = "无法获取仓库版本（网络受限或仓库不可达）";
+                return result;
             }
+
+            result.LatestRaw = ver;
+            result.Latest = ParseVersion(ver);
+            result.ReleaseNotes = notes;
+            result.DownloadUrl = url;
+            result.Source = source;
 
             if (result.Latest == null)
             {
-                result.Error = "远端版本号无法解析：" + (result.LatestRaw ?? "(空)");
+                result.Error = "远端版本号无法解析：" + (ver ?? "(空)");
                 return result;
             }
 
@@ -129,13 +144,16 @@ namespace LenovoCoolBoost
             return result;
         }
 
+        // ------------------------------------------------------------------
+        // 来源 1：GitHub Releases latest
+        // ------------------------------------------------------------------
         private static bool TryGetLatestRelease(out string tag, out string body, out string url)
         {
             tag = null; body = null; url = null;
             try
             {
                 string api = string.Format("https://api.github.com/repos/{0}/{1}/releases/latest", Owner, Repo);
-                string json = GetString(api);
+                string json = GetString(NoCache(api));
                 if (json == null) return false;
 
                 using (var doc = JsonDocument.Parse(json))
@@ -168,16 +186,57 @@ namespace LenovoCoolBoost
             catch { return false; }
         }
 
-        private static bool TryGetVersionJson(out string version, out string notes, out string url)
+        // ------------------------------------------------------------------
+        // 来源 2：version.json via Contents API（api.github.com，受限网络也能通）
+        // ------------------------------------------------------------------
+        private static bool TryGetVersionJsonViaApi(out string version, out string notes, out string url)
+        {
+            version = null; notes = null; url = null;
+            try
+            {
+                string api = string.Format("https://api.github.com/repos/{0}/{1}/contents/version.json", Owner, Repo);
+                string json = GetString(NoCache(api));
+                if (json == null) return false;
+
+                using (var doc = JsonDocument.Parse(json))
+                {
+                    var root = doc.RootElement;
+                    if (!root.TryGetProperty("content", out var c)) return false;
+                    string enc = null;
+                    if (root.TryGetProperty("encoding", out var e)) enc = e.GetString();
+                    if (enc != "base64") return false;
+
+                    string b64 = (c.GetString() ?? "").Replace("\n", "").Replace("\r", "");
+                    byte[] bytes = Convert.FromBase64String(b64);
+                    string text = Encoding.UTF8.GetString(bytes);
+                    return ParseVersionJson(text, out version, out notes, out url);
+                }
+            }
+            catch { return false; }
+        }
+
+        // ------------------------------------------------------------------
+        // 来源 3：version.json via raw（部分网络不可达，作为最后兜底）
+        // ------------------------------------------------------------------
+        private static bool TryGetVersionJsonViaRaw(out string version, out string notes, out string url)
         {
             version = null; notes = null; url = null;
             try
             {
                 string raw = string.Format(
                     "https://raw.githubusercontent.com/{0}/{1}/main/version.json", Owner, Repo);
-                string json = GetString(raw);
+                string json = GetString(NoCache(raw));
                 if (json == null) return false;
+                return ParseVersionJson(json, out version, out notes, out url);
+            }
+            catch { return false; }
+        }
 
+        private static bool ParseVersionJson(string json, out string version, out string notes, out string url)
+        {
+            version = null; notes = null; url = null;
+            try
+            {
                 using (var doc = JsonDocument.Parse(json))
                 {
                     var root = doc.RootElement;
@@ -185,9 +244,9 @@ namespace LenovoCoolBoost
                     if (root.TryGetProperty("notes", out var n)) notes = n.GetString();
                     if (root.TryGetProperty("download_url", out var d)) url = d.GetString();
                 }
-                return !string.IsNullOrEmpty(version);
             }
             catch { return false; }
+            return !string.IsNullOrEmpty(version);
         }
 
         private static string GetString(string url)
@@ -218,20 +277,16 @@ namespace LenovoCoolBoost
             return Version.TryParse(s, out v) ? v : null;
         }
 
-        /// <summary>在后台执行检查并在完成后回调（回调在调用线程的同步上下文之外，请自行切回 UI 线程）。</summary>
+        /// <summary>在后台执行检查并在完成后回调（回调不在 UI 线程，请自行切回）。</summary>
         public static void CheckAsync(Action<UpdateCheckResult> done)
         {
-            ThreadPool.QueueUserWorkItem(_ =>
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
             {
                 UpdateCheckResult r;
                 try { r = Check(); }
                 catch (Exception ex)
                 {
-                    r = new UpdateCheckResult
-                    {
-                        Current = CurrentVersion,
-                        Error = ex.Message
-                    };
+                    r = new UpdateCheckResult { Current = CurrentVersion, Error = ex.Message };
                 }
                 try { if (done != null) done(r); } catch { }
             });

@@ -13,12 +13,17 @@
 
 ### 自动检查更新
 
-数据来源按优先级：
+数据来源按优先级依次尝试（前一个失败才用下一个）：
 
 1. **GitHub Releases** —— `GET /repos/{owner}/{repo}/releases/latest` 取 `tag_name`；
    若该发布附带了 `.exe` 资源，下载地址直接指向该资源。
-2. **`version.json`**（仓库根目录）—— 没有发布 Release 时兜底，
-   格式：`{ "version": "1.3.0", "notes": "...", "download_url": "..." }`。
+2. **`version.json` 走 Contents API** —— 同样是 `api.github.com`，读仓库根目录的
+   `version.json` 并 base64 解码。
+3. **`version.json` 走 raw** —— `raw.githubusercontent.com`，最后兜底。
+
+> 为什么要有第 2 步：实测本机网络下 `raw.githubusercontent.com` 与 `cdn.jsdelivr.net`
+> 均不可达，只有 `api.github.com` 可通。若只依赖 raw 兜底，一旦没有 Release
+> 就会彻底查不到版本。已实测：删除 Release 后程序正确降级为 `来源：contents-api`。
 
 行为：
 
@@ -33,6 +38,8 @@
 - 版本比较用 `System.Version` 逐段比较，支持 `v1.3.0` / `1.3` / `1.3.0.0`
   以及 `1.3.0-beta` 这类带后缀的写法（后缀会被忽略）。
 - 网络请求超时 8 秒，所有异常都收敛成结果对象，不会因为断网影响程序其余功能。
+- 请求带 `Cache-Control: no-cache/no-store` 并追加时间戳参数：实测本机有加速代理
+  （Watt Toolkit）会缓存 `/releases/latest`，导致新版本已发布或已删除时仍读到旧结果。
 
 ### 说明
 

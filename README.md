@@ -171,10 +171,22 @@ tools/                    逆向期的探针脚本 + 图标生成（见下方说
 
 **版本号从哪来**
 
+按顺序尝试，前一个失败才用下一个：
+
 | 优先级 | 来源 | 说明 |
 |---|---|---|
 | 1 | GitHub Releases 的 `latest` | 读 `tag_name`；发布里带 `.exe` 资源时下载地址指向该资源 |
-| 2 | 仓库根目录 `version.json` | 没有发布 Release 时兜底：`{ "version": "1.3.0", ... }` |
+| 2 | 仓库 `version.json`（Contents API） | 走 `api.github.com`，读 `version.json` 并 base64 解码 |
+| 3 | 仓库 `version.json`（raw） | `raw.githubusercontent.com`，最后兜底 |
+
+> 第 2 步存在的原因：部分网络下 `raw.githubusercontent.com` / `jsdelivr` 不可达，
+> 只有 `api.github.com` 能通；若只靠 raw 兜底，一旦没有 Release 就查不到版本。
+
+`version.json` 格式：
+
+```json
+{ "version": "1.3.0", "notes": "更新说明", "download_url": "https://..." }
+```
 
 **在哪能看到**
 
