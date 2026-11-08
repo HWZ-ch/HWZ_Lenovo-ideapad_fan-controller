@@ -4,7 +4,7 @@
 
 > 逆向与分析机型：**联想小新 16 IRL8**（Lenovo EM 机型，`AcpiVpc.sys` 驱动）
 >
-> 当前版本 **v1.2.1** —— 变更明细见 [CHANGELOG.md](CHANGELOG.md)
+> 当前版本 **v1.3.0** —— 变更明细见 [CHANGELOG.md](CHANGELOG.md)
 
 ---
 
@@ -93,6 +93,8 @@ dotnet publish -c Release -r win-x64 --self-contained false `
 
 ```powershell
 LenovoCoolBoost.exe --tray    # 启动后只驻留托盘，不显示窗口
+LenovoCoolBoost.exe --version # 打印版本号后退出
+LenovoCoolBoost.exe --check-update  # 对比仓库最新版本（0=已最新 1=有新版本 2=检查失败）
 LenovoCoolBoost.exe --status  # 只读打印设备名/状态/阈值/权限，不改风扇状态
 LenovoCoolBoost.exe --off     # 一次性恢复默认转速（善后，不影响正在运行的实例）
 LenovoCoolBoost.exe --test    # 无界面自检：开启并采样 180 秒，保持率 ≥90% 算通过；结束后自动恢复
@@ -134,11 +136,13 @@ python python\lenovo_cool_boost.py start    # 持续激活（先校准再保活�
 ```
 src/LenovoCoolBoost/      C# 桌面程序（主交付物）
   FanController.cs          EnergyDrv 设备封装：探测/校准/开关/读状态/保活循环
-  Program.cs                控制窗口、托盘、--status/--off、自检(--test)、观测(--diag)
+  Program.cs                控制窗口、托盘、--status/--off/--version/--check-update、自检、观测
+  UpdateChecker.cs          从仓库取最新版本并与本地版本比对
   app.ico                   应用图标（16~256 多尺寸，由 tools/gen_icon.py 生成）
   LenovoCoolBoost-signing.cer  代码签名证书公钥（自签名，见「代码签名」一节）
 src/lhm_spike/            为确认「读不到真实转速」而做的最小验证程序（LibreHardwareMonitor 探针）
 python/lenovo_cool_boost.py   Python 版同后端实现
+version.json              仓库端版本清单（更新检查的兜底数据源）
 docs/FanControl_Setup_Guide.md 备选方案：FanControl + Lenovo 插件（GUI，无需写代码）
 docs/RESEARCH_NOTES.md    完整逆向过程、被证伪的路径与踩坑记录
 CHANGELOG.md              版本变更记录
@@ -158,6 +162,43 @@ tools/                    逆向期的探针脚本 + 图标生成（见下方说
 > 除 `gen_icon.py` 外都是逆向期的诊断脚本，**保留仅供复盘，不是推荐使用路径**。
 
 > ⚠️ `ec_fan_lock.py` / `ec_scan_fan.py` 依赖 **InpOut32/InpOutx64** 的端口 I/O 驱动（`inpoutx64.dll` + `.sys`）。为保持仓库干净，**本仓库不附带这些二进制文件**，需要时请自行从 <https://www.highrez.co.uk/downloads/inpout32/> 获取，并放到 `tools/inpout/x64/` 下。请注意 InpOut 是第三方驱动，使用时自行确认其许可证与安全风险。
+
+---
+
+## 版本与更新检查
+
+程序会显示自身版本，并自动与仓库上的最新版本比对。
+
+**版本号从哪来**
+
+| 优先级 | 来源 | 说明 |
+|---|---|---|
+| 1 | GitHub Releases 的 `latest` | 读 `tag_name`；发布里带 `.exe` 资源时下载地址指向该资源 |
+| 2 | 仓库根目录 `version.json` | 没有发布 Release 时兜底：`{ "version": "1.3.0", ... }` |
+
+**在哪能看到**
+
+- 主窗口底部常显 `版本 v1.3.0`；查过之后会显示 `（已是最新）` 或 `→ 可更新到 vX.Y.Z`
+- 托盘右键菜单里有只读的「版本 vX.Y.Z」与「检查更新...」
+- 窗口上的「检查更新」按钮；发现新版本时底部出现可点击的下载链接
+- 命令行：`--version`、`--check-update`
+
+**自动还是手动**
+
+启动时在后台静默检查一次，**只有发现新版本才弹托盘提示**；失败或已最新时完全静默。
+手动检查会用对话框明确告知结果（包括失败原因）。
+
+**不会自动替换自身**
+
+本功能只做检查与提示。程序以管理员权限运行，静默覆盖自身容易被安全软件拦截、
+出问题也难回滚，所以确认后由你点击链接自行下载替换。
+
+**发布新版本时**
+
+1. 改 `src/LenovoCoolBoost/LenovoCoolBoost.csproj` 里的 `<Version>`
+2. 同步更新根目录 `version.json` 的 `version`
+3. 在 GitHub 发一个 tag 为 `vX.Y.Z` 的 Release，并把签好名的 exe 作为资源上传
+   （有 Release 时程序优先读 Release，`version.json` 只是兜底）
 
 ---
 

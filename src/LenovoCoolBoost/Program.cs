@@ -22,6 +22,8 @@ namespace LenovoCoolBoost
     /// 命令行：
     ///   (无参数)      打开控制窗口，并自动开启满速
     ///   --tray        启动后只驻留托盘（不显示窗口）
+    ///   --version     打印版本号后退出
+    ///   --check-update 对比仓库最新版本后退出（0=已最新 1=有新版本 2=检查失败）
     ///   --status      打印当前风扇状态后退出（只读，不会改变风扇状态）
     ///   --off         一次性恢复默认转速后退出
     ///   --test        无界面自检：开启并采样 180 秒，结束自动恢复
@@ -43,6 +45,15 @@ namespace LenovoCoolBoost
         private Button _exitButton;
         private CheckBox _autoStartCheck;
         private System.Windows.Forms.Timer _refreshTimer;
+
+        // 版本 / 更新检查
+        private Label _versionLabel;
+        private Button _updateButton;
+        private LinkLabel _updateLink;
+        private ToolStripMenuItem _trayUpdateItem;
+        private ToolStripMenuItem _trayVersionItem;
+        private volatile bool _checkingUpdate;
+        private UpdateCheckResult _lastUpdateResult;
 
         private NotifyIcon _tray;
         private ToolStripMenuItem _trayStatusItem;
@@ -156,6 +167,8 @@ namespace LenovoCoolBoost
         {
             Log("=== 启动 === 参数=[" + string.Join(" ", args ?? new string[0]) + "]");
 
+            if (HasArg(args, "--version")) { AttachParentConsole(); CmdVersion(); return; }
+            if (HasArg(args, "--check-update")) { AttachParentConsole(); CmdCheckUpdate(); return; }
             if (HasArg(args, "--status")) { AttachParentConsole(); CmdStatus(); return; }
             if (HasArg(args, "--off")) { AttachParentConsole(); CmdRestore(); return; }
             if (HasArg(args, "--test")) { SelfTest(); return; }
@@ -251,6 +264,40 @@ namespace LenovoCoolBoost
                 Environment.Exit(1);
             }
             finally { fan.Dispose(); }
+        }
+
+        private static void CmdVersion()
+        {
+            Console.WriteLine("LenovoCoolBoost v" + UpdateChecker.CurrentVersion.ToString(3));
+        }
+
+        /// <summary>
+        /// --check-update：把本地版本与仓库最新版本比对后退出。
+        /// 退出码：0 = 已是最新，1 = 有新版本，2 = 检查失败。
+        /// </summary>
+        private static void CmdCheckUpdate()
+        {
+            var r = UpdateChecker.Check();
+            Console.WriteLine("本地版本 : v" + r.Current.ToString(3));
+            if (r.Error != null)
+            {
+                Console.WriteLine("检查结果 : 失败 - " + r.Error);
+                Environment.Exit(2);
+            }
+            Console.WriteLine("仓库版本 : v" + r.Latest.ToString(3) + "  （来源：" + r.Source + "）");
+            Console.WriteLine("检查结果 : " + (r.HasUpdate ? "发现新版本" : "已是最新"));
+            if (r.HasUpdate)
+            {
+                Console.WriteLine("下载地址 : " + r.DownloadUrl);
+                if (!string.IsNullOrEmpty(r.ReleaseNotes))
+                {
+                    Console.WriteLine("更新说明 :");
+                    foreach (var line in r.ReleaseNotes.Split('\n'))
+                        Console.WriteLine("  " + line.TrimEnd());
+                }
+                Environment.Exit(1);
+            }
+            Environment.Exit(0);
         }
 
         // ------------------------------------------------------------------
@@ -430,6 +477,8 @@ namespace LenovoCoolBoost
                 {
                     Log("窗口已显示，开始自动开启满速...");
                     StartFan(false);
+                    // 启动后静默检查一次更新（后台线程，不阻塞界面；有新版本才提示）
+                    CheckForUpdates(false);
                 }));
             };
         }
@@ -440,7 +489,7 @@ namespace LenovoCoolBoost
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(420, 250);
+            ClientSize = new Size(420, 288);
             Icon = LoadIcon(32, ref _iconLarge);
 
             var font = new Font("Microsoft YaHei UI", 9f);
@@ -514,10 +563,39 @@ namespace LenovoCoolBoost
             };
             _exitButton.Click += (s, e) => ExitApp();
 
+            // ---- 版本号（原来是不显示的，这里明确显示出来）----
+            _versionLabel = new Label
+            {
+                Text = "版本 v" + UpdateChecker.CurrentVersion.ToString(3),
+                ForeColor = Color.DimGray,
+                Location = new Point(18, 208),
+                Size = new Size(200, 20)
+            };
+
+            _updateButton = new Button
+            {
+                Text = "检查更新",
+                Location = new Point(300, 202),
+                Size = new Size(102, 28),
+                Font = font
+            };
+            _updateButton.Click += (s, e) => CheckForUpdates(true);
+
+            // 有更新时这里显示可点击的链接，平时为空并隐藏
+            _updateLink = new LinkLabel
+            {
+                Text = "",
+                Location = new Point(18, 234),
+                Size = new Size(384, 20),
+                Visible = false
+            };
+            _updateLink.LinkClicked += (s, e) => OpenDownloadPage();
+
             Controls.AddRange(new Control[]
             {
                 title, _statusLabel, _detailLabel, _startButton, _stopButton,
-                _autoStartCheck, _hideButton, _exitButton
+                _autoStartCheck, _hideButton, _exitButton,
+                _versionLabel, _updateButton, _updateLink
             });
 
             RefreshStatus();
@@ -538,6 +616,10 @@ namespace LenovoCoolBoost
             }) { Checked = IsAutoStart() };
             var trayExitItem = new ToolStripMenuItem("退出(并恢复默认)", null, (s, e) => ExitApp());
 
+            _trayVersionItem = new ToolStripMenuItem(
+                "版本 v" + UpdateChecker.CurrentVersion.ToString(3)) { Enabled = false };
+            _trayUpdateItem = new ToolStripMenuItem("检查更新...", null, (s, e) => CheckForUpdates(true));
+
             var menu = new ContextMenuStrip();
             menu.Items.Add(_trayShowItem);
             menu.Items.Add(new ToolStripSeparator());
@@ -546,6 +628,8 @@ namespace LenovoCoolBoost
             menu.Items.Add(_trayStopItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(trayAutoItem);
+            menu.Items.Add(_trayVersionItem);
+            menu.Items.Add(_trayUpdateItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(trayExitItem);
 
@@ -695,6 +779,103 @@ namespace LenovoCoolBoost
                 }
             }
             RefreshStatus();
+        }
+
+        // ------------------------------------------------------------------
+        // 版本检查更新
+        // ------------------------------------------------------------------
+        private void CheckForUpdates(bool interactive)
+        {
+            if (_checkingUpdate)
+            {
+                if (interactive)
+                    MessageBox.Show(this, "正在检查更新，请稍候…", "检查更新",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            _checkingUpdate = true;
+            if (_updateButton != null) _updateButton.Enabled = false;
+            if (_trayUpdateItem != null) _trayUpdateItem.Text = "检查更新... (检查中)";
+            Log("开始检查更新，本地版本 v" + UpdateChecker.CurrentVersion.ToString(3));
+
+            UpdateChecker.CheckAsync(r =>
+            {
+                try { BeginInvoke(new Action(() => ApplyUpdateResult(r, interactive))); }
+                catch { }
+            });
+        }
+
+        private void ApplyUpdateResult(UpdateCheckResult r, bool interactive)
+        {
+            _checkingUpdate = false;
+            _lastUpdateResult = r;
+            if (_updateButton != null) _updateButton.Enabled = true;
+            if (_trayUpdateItem != null) _trayUpdateItem.Text = "检查更新...";
+            Log("更新检查结果: " + r.Describe());
+
+            string cur = r.Current.ToString(3);
+
+            if (r.Error != null)
+            {
+                if (_updateLink != null) _updateLink.Visible = false;
+                if (_versionLabel != null) _versionLabel.Text = "版本 v" + cur;
+                if (interactive)
+                    MessageBox.Show(this, "检查更新失败：\n" + r.Error, "检查更新",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            string lat = r.Latest.ToString(3);
+            if (r.HasUpdate)
+            {
+                if (_updateLink != null)
+                {
+                    _updateLink.Text = string.Format("发现新版本 v{0}，点击下载", lat);
+                    _updateLink.Tag = r.DownloadUrl;
+                    _updateLink.Visible = true;
+                }
+                if (_versionLabel != null)
+                    _versionLabel.Text = string.Format("版本 v{0}  →  可更新到 v{1}", cur, lat);
+                if (_trayVersionItem != null)
+                    _trayVersionItem.Text = string.Format("版本 v{0}（可更新到 v{1}）", cur, lat);
+
+                if (_tray != null)
+                {
+                    _tray.ShowBalloonTip(6000, "发现新版本",
+                        string.Format("当前 v{0} → 最新 v{1}，点击托盘菜单可查看", cur, lat),
+                        ToolTipIcon.Info);
+                }
+                else if (interactive)
+                {
+                    MessageBox.Show(this, string.Format("发现新版本 v{0}（当前 v{1}）。", lat, cur),
+                        "检查更新", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+            }
+            else
+            {
+                if (_updateLink != null) _updateLink.Visible = false;
+                if (_versionLabel != null) _versionLabel.Text = "版本 v" + cur + "（已是最新）";
+                if (_trayVersionItem != null) _trayVersionItem.Text = "版本 v" + cur + "（已是最新）";
+                if (interactive)
+                    MessageBox.Show(this, string.Format("当前已是最新版本 v{0}。", cur),
+                        "检查更新", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+        }
+
+        private void OpenDownloadPage()
+        {
+            string url = null;
+            if (_updateLink != null && _updateLink.Tag is string) url = (string)_updateLink.Tag;
+            if (string.IsNullOrEmpty(url) && _lastUpdateResult != null) url = _lastUpdateResult.DownloadUrl;
+            if (string.IsNullOrEmpty(url))
+                url = "https://github.com/HWZ-ch/HWZ_Lenovo-ideapad_fan-controller/releases";
+            try
+            {
+                Log("打开下载页: " + url);
+                Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true });
+            }
+            catch (Exception ex) { Log("打开下载页失败: " + ex.Message); }
         }
 
         private void RefreshStatus()

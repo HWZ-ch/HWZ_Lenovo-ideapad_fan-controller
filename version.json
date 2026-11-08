@@ -1,0 +1,5 @@
+{
+  "version": "1.3.0",
+  "notes": "新增：界面显示版本号；启动自动比对仓库最新版本；发现新版本时提示并给下载入口",
+  "download_url": "https://github.com/HWZ-ch/HWZ_Lenovo-ideapad_fan-controller/releases/latest"
+}
